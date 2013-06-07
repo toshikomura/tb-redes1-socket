@@ -1,0 +1,203 @@
+#include "include.h"
+#include "socket.h"
+#include "protocolo.h"
+
+char *path, *path_anterior;
+int servidor, sequencia;
+DIR *diretorio_atual;
+
+/*-------------------------------------------------------------------------*/
+/* FUNCAO QUE TROCA DE DIRETORIO                                           */
+/*-------------------------------------------------------------------------*/
+void Troca_Diretorio ( ) {
+
+	int erro;
+	mensagem  *msg = ( mensagem *) malloc ( sizeof ( mensagem ) );
+	
+	// abre o diretorio
+	diretorio_atual = opendir ( path );
+
+	// Erro ao entrar no diretorio
+	if ( diretorio_atual == NULL ) {
+		// pegando valor do erro
+     	erro = errno;
+		switch ( erro ) {
+			case ENOENT: 
+					erro = DIR_INEXISTENTE;
+					break;
+			case EACCES: 
+					 erro = PERMISSAO_NEGADA;
+					break; 
+		}
+		Envia_ERRO ( servidor, erro );
+		strcpy ( path, path_anterior );
+	}
+	else
+		Envia_ACK ( servidor );
+}
+
+
+/*-------------------------------------------------------------------------*/
+/* FUNCAO QUE ENVIA DADOS DO DIRETORIO                                     */
+/*-------------------------------------------------------------------------*/
+void LS ( ) {
+
+	char *buffer;
+	int erro, tamanho, s;
+	struct dirent *de;
+	struct stat buf;
+
+	mensagem *msg = ( mensagem *) malloc ( sizeof ( mensagem ) );
+
+	// abre o diretorio	
+	diretorio_atual = opendir ( path );
+
+	// percorre o diretorio
+	while ( de = readdir ( diretorio_atual ) ) {
+		if ( ! strcmp ( de->d_name, ".") || ! strcmp ( de->d_name, ".." ) )
+			continue;
+
+		stat ( path, &buf );
+
+		tamanho = strlen ( de->d_name );
+
+		if ( de->d_name[0] != '.' ) {
+			msg = Codifica_Cabecalho_Insere_Dados ( ( char *) de->d_name, sequencia, MSG_PRINT ,&tamanho );
+			Envia_Espera ( msg, servidor, &tamanho );
+		}
+	}
+
+	// envia que os dados do diretorio acabaram
+	msg = Codifica_Cabecalho_Insere_Dados ( NULL, sequencia, MSG_FIM ,&tamanho );
+	buffer = Mensagem_Buffer ( *msg, tamanho );
+	s = send ( servidor, buffer, (ssize_t) MAX_MENSAGEM, 0 );
+
+}
+
+
+/*-------------------------------------------------------------------------*/
+/* FUNCAO QUE ENVIA DADOS DE UM ARQUIVO                                    */
+/*-------------------------------------------------------------------------*/
+void GET ( char *path ) {
+
+	char *buffer, tam_dado[5];
+	int erro, tamanho, tamanho_arq, s;
+	struct stat buf;
+	mensagem *msg = ( mensagem *) malloc ( sizeof ( mensagem ) );
+	FILE *arquivo;
+
+	// abre o arquivo
+	arquivo = fopen ( path, "r" );
+
+	if ( arquivo == NULL ) {
+		Envia_ERRO ( servidor, ARQ_INEXISTENTE );
+		return;
+	}
+
+	stat( path, &buf );
+
+	// Se é um arquivo 
+	if ( S_ISREG ( buf.st_mode ) ) {
+		
+		// enviando os atributos
+		sprintf ( tam_dado, "%d", (int) buf.st_size );
+		tamanho_arq = strlen ( tam_dado ) + 1;
+		msg = Codifica_Cabecalho_Insere_Dados ( ( char *) &tamanho_arq, sequencia, MSG_FIM ,&tamanho );
+		buffer = Mensagem_Buffer ( *msg, tamanho );
+		Envia_Espera ( msg, servidor, &tamanho );
+
+		// fim do envio do arquivo
+		msg = Codifica_Cabecalho_Insere_Dados ( NULL, sequencia, MSG_FIM ,&tamanho_arq );
+		buffer = Mensagem_Buffer ( *msg, tamanho );
+		s = send ( servidor, buffer, (ssize_t) MAX_MENSAGEM, 0 );
+
+	}
+	else 
+		Envia_ERRO ( servidor, PERMISSAO_NEGADA );
+
+	fclose ( arquivo );
+
+}
+
+
+// Envia NACK quando houver erro no crc
+main () {
+
+	char buffer[18], *path_aux;
+	int	r, i, sequencia_anterior, 
+		*marca, *tamanho, *tipo;
+	mensagem *msg;
+
+	servidor = Cria_Socket ( (char *) "eth0" );
+
+	marca = malloc ( sizeof (int) );
+	tamanho = malloc ( sizeof (int) );
+	tipo = malloc ( sizeof (int) );
+	path = ( char *) malloc ( sizeof ( char )*99999999 );
+	path_anterior = ( char *) malloc ( sizeof ( char )*99999999 );
+	path_aux = ( char *) malloc ( sizeof ( char )*99999999 );
+
+	// inicia o path em /
+	path[0] = '.';
+	path[1] = '/';
+	path[2] = '\0';
+	
+	while ( 1 ) {
+		int k;
+		for (k = 0; k < MAX_MENSAGEM ; k++) {
+			scanf ( "%d", &buffer[k] );
+			printf ("%d\n", buffer[k]);
+		}
+
+	//	r = recv ( servidor, buffer, (size_t) MAX_MENSAGEM, 0 );
+	//	if ( r != MAX_MENSAGEM )
+	//		Mensagem_Erro ( ( char *) "recepcao da mensagem" );
+
+		msg = Buffer_Mensagem ( buffer );
+		
+		// Se a marca da mensagem estiver correta
+		if ( Decodifica_Cabecalho ( msg, marca, tamanho, &sequencia, tipo ) == 1 ) {
+			switch ( *tipo ) {
+				case MSG_CD:
+						printf ( "cd\n" );
+						// se cd /....
+						if ( msg->dado[0] == '/' ) 
+							strcpy ( path, msg->dado );
+						else {
+							strcat ( path, msg->dado);
+							if ( path [ strlen ( path ) - 1 ] != '/' )
+								strcat ( path, "/" );
+						} 
+						for (k = 0; path[k] != '\0'; k++ ) 
+							printf ("%c ", path[k]);
+						printf ("\n");
+						Troca_Diretorio ( );
+						break;
+				case MSG_LS: 
+						printf ( "ls\n" );
+						LS ( );
+						break;
+				case MSG_GET:
+						printf ( "get\n" );
+						strcpy ( path_aux, path );
+						printf ( "path: %s\n", path_aux );
+						printf ( "dado: %s\n", msg->dado );
+						strcat ( path_aux, msg->dado );
+						printf ( "path: %s\n", path_aux );
+						GET ( path_aux );
+						break;
+				case MSG_PUT:
+						printf ( "put\n" );
+						break;
+				default:
+						printf ( "comando inexistente\n" );
+						break;
+			}
+			
+		}
+		break;
+	}
+
+	close ( servidor );
+
+}
